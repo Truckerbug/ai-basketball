@@ -1,0 +1,18 @@
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/AI Basketball.deps.json
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/AI Basketball.runtimeconfig.json
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/AI Basketball.runtimeconfig.dev.json
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/AI Basketball.dll
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/AI Basketball.pdb
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/GodotSharp.dll
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/bin/Debug/GodotSharpEditor.dll
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.csproj.AssemblyReference.cache
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.GeneratedMSBuildEditorConfig.editorconfig
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.AssemblyInfoInputs.cache
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.AssemblyInfo.cs
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.csproj.CoreCompileInputs.cache
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Baske.87F225D8.Up2Date
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.dll
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/refint/AI Basketball.dll
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.pdb
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/AI Basketball.genruntimeconfig.cache
+/Users/truckerbug/workspace/ai-basketball/.godot/mono/temp/obj/Debug/ref/AI Basketball.dll

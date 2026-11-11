@@ -1,0 +1,24 @@
+# Godot 4+ generated files (regenerated when the project is opened)
+.godot/
+
+# Godot-specific
+.import/
+export.cfg
+export_presets.cfg
+*.translation
+
+# .NET / C#
+.mono/
+data_*/
+mono_crash.*.json
+bin/
+obj/
+.vs/
+*.user
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Note: saves/*.bin is NOT ignored on purpose. That folder holds trained brains
+# (press [E] in the sim to export the current population there).

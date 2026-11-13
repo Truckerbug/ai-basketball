@@ -2,40 +2,48 @@ using Godot;
 using System;
 using System.IO;
 
-// Stage 3: 40 humanoid bots, each in its own cell, evolving to fetch a ball and SHOOT baskets.
-// The rim starts huge and shrinks toward regulation as the population gets good enough.
-// Controls: Up/Down = sim speed, Tab = overview / follow-a-bot camera, Left/Right = pick bot,
-//           S = save now, R = restart from scratch (deletes the save).
+// Stage 4: half-court 1v1. Forty bots play twenty games at a time (random pairings every generation).
+// Each game: two bots, one ball, one hoop. Score at the hoop, steal the ball, rebound misses.
+// The rim starts a bit large and shrinks to regulation as the population gets good enough.
+// Controls: Up/Down = sim speed, Tab = overview / follow-one-game camera, Left/Right = pick game,
+//           S = save now, E = export population into the project, R = restart from scratch.
 public partial class Main : Node3D
 {
-    const int Cols = 8;
-    const int Rows = 5;
-    const int PopSize = Cols * Rows;
-    const float CellSize = 12f;
-    const float EpisodeTime = 25f;
+    const int Cols = 5;
+    const int Rows = 4;
+    const int Matches = Cols * Rows;
+    const int PopSize = Matches * 2;
+    const float CellSize = 14f;
+    const float EpisodeTime = 40f;
     const float Dt = 1f / 30f;
     const int SaveEvery = 5;
-    const string SaveName = "user://population_stage3c.bin";   // 3c = real rim collisions + strict basket rules
-    const string SeedPath = "res://saves/population_stage3c.bin";
-    // Older 3b brains (lenient rim) are still worth keeping: they load as a warm start with the rim reset.
-    const string LegacySaveName = "user://population_stage3b.bin";
-    const string LegacySeedPath = "res://saves/population_stage3b.bin"; // brains shipped with the project (see [E])
 
-    // Curriculum: shrink the rim 10% once the average bot makes this many baskets per generation.
-    const float ShrinkAtAvgMakes = 1.0f;   // compared against a smoothed average, so one lucky generation can't trigger it
+    const string SaveName = "user://population_stage4c.bin";    // 4c = no free near-miss lobs; older 4/4b populations are ignored
+    const string SeedPath = "res://saves/population_stage4c.bin";
+    // Older stage 3 brains are converted into the bigger stage 4 network as a warm start.
+    const string Legacy3cSave = "user://population_stage3c.bin";
+    const string Legacy3cSeed = "res://saves/population_stage3c.bin";
+    const string Legacy3bSave = "user://population_stage3b.bin";
+    const string Legacy3bSeed = "res://saves/population_stage3b.bin";
+
+    // Curriculum: shrink the rim 10% once the average bot scores this many baskets per game (smoothed).
+    const float ShrinkAtAvgMakes = 0.6f;
     const int MinGensBetweenShrinks = 5;
-    const float StartRimRadius = 1.2f;
+    const float StartRimRadius = 0.8f;
 
-    static readonly int[] Layers = { Humanoid.NumInputs, 16, Humanoid.NumOutputs };
+    static readonly int[] Layers = { Humanoid.NumInputs, 20, Humanoid.NumOutputs };
+    static readonly int[] OldLayers = { 9, 16, 6 };   // stage 3 network
     static readonly float[] SpeedLevels = { 0.25f, 1f, 2f, 4f, 16f, 64f, 256f, 1024f };
 
-    Humanoid[] bots = new Humanoid[PopSize];
-    MeshInstance3D[] balls = new MeshInstance3D[PopSize];
-    Node3D[] hoops = new Node3D[PopSize];
-    MeshInstance3D[] rims = new MeshInstance3D[PopSize];
-    MeshInstance3D[] boards = new MeshInstance3D[PopSize];
-    MeshInstance3D[] poles = new MeshInstance3D[PopSize];
-    MeshInstance3D leaderDot;
+    Humanoid[] bots = new Humanoid[PopSize];      // slot 2m and 2m+1 play in match m
+    int[] perm = new int[PopSize];                // slot -> genome index for this generation
+    Match[] matches = new Match[Matches];
+    MeshInstance3D[] balls = new MeshInstance3D[Matches];
+    MeshInstance3D[] dots = new MeshInstance3D[Matches];   // marks who has the ball
+    Node3D[] hoops = new Node3D[Matches];
+    MeshInstance3D[] rims = new MeshInstance3D[Matches];
+    MeshInstance3D[] boards = new MeshInstance3D[Matches];
+    MeshInstance3D[] poles = new MeshInstance3D[Matches];
     Camera3D cam;
     Label hud;
     Evolution evo;
@@ -47,16 +55,15 @@ public partial class Main : Node3D
     bool followCam;
     int followIdx;
     int savedSpeedIdx;
-    bool showElites;
     float shownRim = -1f;
     int gensSinceShrink;
     float makesEma;
 
-    float lastBest, lastAvg, bestEver, lastAvgMakes;
-    int lastBestMakes, lastBestShots;
-    int leaderIdx;
+    float lastBest, lastAvg, bestEver, lastAvgMakes, lastAvgNearMiss;
+    int lastBestMakes, lastBestShots, lastBestSteals;
 
     static readonly Color Blue = new Color(0.3f, 0.5f, 0.9f);
+    static readonly Color Red = new Color(0.9f, 0.3f, 0.25f);
     static readonly Color Gold = new Color(1.0f, 0.78f, 0.2f);
 
     string SavePath => ProjectSettings.GlobalizePath(SaveName);
@@ -65,11 +72,11 @@ public partial class Main : Node3D
     {
         BuildEnvironment();
         BuildArena();
-        BuildBots();
+        BuildMatches();
         BuildHud();
 
         evo = new Evolution(PopSize, Brain.GeneCount(Layers), 1234);
-        Humanoid.RimRadius = StartRimRadius;
+        Match.RimRadius = StartRimRadius;
         TryLoad();
         ApplyRimVisuals();
         StartGeneration();
@@ -106,7 +113,7 @@ public partial class Main : Node3D
     {
         var matA = new StandardMaterial3D { AlbedoColor = new Color(0.17f, 0.19f, 0.22f), Roughness = 1f };
         var matB = new StandardMaterial3D { AlbedoColor = new Color(0.21f, 0.23f, 0.27f), Roughness = 1f };
-        for (int i = 0; i < PopSize; i++)
+        for (int i = 0; i < Matches; i++)
         {
             int c = i % Cols, r = i / Cols;
             var floor = new MeshInstance3D
@@ -155,20 +162,20 @@ public partial class Main : Node3D
 
     void ApplyRimVisuals()
     {
-        float r = Humanoid.RimRadius;
+        float r = Match.RimRadius;
         shownRim = r;
         float rimScale = r / 0.46f; // the torus mid-radius is 0.46
-        for (int i = 0; i < PopSize; i++)
+        for (int i = 0; i < Matches; i++)
         {
             rims[i].Scale = new Vector3(rimScale, 1f, rimScale);
-            rims[i].Position = new Vector3(0, Humanoid.RimY, 0);
+            rims[i].Position = new Vector3(0, Match.RimY, 0);
             boards[i].Scale = new Vector3(2f * r + 1f, 1f, 1f);
-            boards[i].Position = new Vector3(0, Humanoid.RimY + 0.375f, -(r + 0.08f));
+            boards[i].Position = new Vector3(0, Match.RimY + 0.375f, -(r + 0.08f));
             poles[i].Position = new Vector3(0, 1.6f, -(r + 0.21f));
         }
     }
 
-    void BuildBots()
+    void BuildMatches()
     {
         var orange = new Color(0.95f, 0.4f, 0.1f);
         var zoneMat = new StandardMaterial3D
@@ -188,40 +195,44 @@ public partial class Main : Node3D
         var boardMat = new StandardMaterial3D { AlbedoColor = new Color(0.9f, 0.9f, 0.95f), Roughness = 0.5f };
         var poleMat = new StandardMaterial3D { AlbedoColor = new Color(0.5f, 0.5f, 0.55f), Roughness = 0.6f };
         var ballMat = new StandardMaterial3D { AlbedoColor = new Color(0.9f, 0.5f, 0.12f), Roughness = 0.8f };
-
-        for (int i = 0; i < PopSize; i++)
+        var dotMat = new StandardMaterial3D
         {
-            var bot = new Humanoid
-            {
-                CellCenter = CellCenterOf(i),
-                CellLimit = CellSize / 2f - 0.8f,
-                Brain = new Brain(Layers)
-            };
+            AlbedoColor = Gold,
+            ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
+        };
+
+        for (int s = 0; s < PopSize; s++)
+        {
+            var bot = new Humanoid { Brain = new Brain(Layers) };
             bot.BuildBody();
+            bot.SetTint(s % 2 == 0 ? Blue : Red);
             AddChild(bot);
-            bots[i] = bot;
-
-            balls[i] = new MeshInstance3D
-            {
-                Mesh = new SphereMesh { Radius = Humanoid.BallRest, Height = Humanoid.BallRest * 2f },
-                MaterialOverride = ballMat
-            };
-            AddChild(balls[i]);
-
-            hoops[i] = MakeHoop(i, zoneMat, rimMat, boardMat, poleMat);
-            AddChild(hoops[i]);
+            bots[s] = bot;
         }
 
-        leaderDot = new MeshInstance3D
+        for (int m = 0; m < Matches; m++)
         {
-            Mesh = new SphereMesh { Radius = 0.18f, Height = 0.36f },
-            MaterialOverride = new StandardMaterial3D
+            matches[m] = new Match(bots[2 * m], bots[2 * m + 1], CellCenterOf(m), CellSize / 2f - 0.8f);
+
+            balls[m] = new MeshInstance3D
             {
-                AlbedoColor = Gold,
-                ShadingMode = BaseMaterial3D.ShadingModeEnum.Unshaded
-            }
-        };
-        AddChild(leaderDot);
+                Mesh = new SphereMesh { Radius = Match.BallRest, Height = Match.BallRest * 2f },
+                MaterialOverride = ballMat
+            };
+            AddChild(balls[m]);
+
+            hoops[m] = MakeHoop(m, zoneMat, rimMat, boardMat, poleMat);
+            hoops[m].Position = matches[m].HoopPos;
+            AddChild(hoops[m]);
+
+            dots[m] = new MeshInstance3D
+            {
+                Mesh = new SphereMesh { Radius = 0.18f, Height = 0.36f },
+                MaterialOverride = dotMat,
+                Visible = false
+            };
+            AddChild(dots[m]);
+        }
     }
 
     void BuildHud()
@@ -239,67 +250,46 @@ public partial class Main : Node3D
 
     // ---------------- training loop ----------------
 
-    // Every bot gets the same ball/hoop sequence in a generation, so scores are fair.
-    // Each ball is at least 4 m from the previous hoop; each hoop at least 4 m from its ball.
-    void MakeSequences(int seed, out Vector2[] ballSeq, out Vector2[] hoopSeq)
-    {
-        var r = new Random(seed);
-        float range = CellSize / 2f - 1.6f;
-        ballSeq = new Vector2[40];
-        hoopSeq = new Vector2[40];
-        Vector2 prevHoop = Vector2.Zero;
-        for (int i = 0; i < ballSeq.Length; i++)
-        {
-            ballSeq[i] = RandomFar(r, range, prevHoop);
-            hoopSeq[i] = RandomFar(r, range, ballSeq[i]);
-            prevHoop = hoopSeq[i];
-        }
-    }
-
-    static Vector2 RandomFar(Random r, float range, Vector2 from)
-    {
-        Vector2 p;
-        int tries = 0;
-        do
-        {
-            p = new Vector2((float)(r.NextDouble() * 2 - 1), (float)(r.NextDouble() * 2 - 1)) * range;
-            tries++;
-        } while (p.DistanceTo(from) < 4f && tries < 50);
-        return p;
-    }
-
     void StartGeneration()
     {
         simTime = 0f;
-        int seed = generation * 7919 + 13;
-        MakeSequences(seed, out Vector2[] ballSeq, out Vector2[] hoopSeq);
-        float yaw = (float)(new Random(seed + 1).NextDouble() * Math.PI * 2);
 
-        for (int i = 0; i < PopSize; i++)
+        // Random pairings: shuffle the genomes, slot 2m and 2m+1 play each other.
+        var rnd = new Random(generation * 7919 + 13);
+        for (int i = 0; i < PopSize; i++) perm[i] = i;
+        for (int i = PopSize - 1; i > 0; i--)
         {
-            bots[i].Brain.Genes = evo.Genomes[i];
-            bots[i].Reset(yaw, ballSeq, hoopSeq);
-            bots[i].SetTint(showElites && i < Evolution.Elites ? Gold : Blue);
+            int j = rnd.Next(i + 1);
+            (perm[i], perm[j]) = (perm[j], perm[i]);
         }
+
+        for (int s = 0; s < PopSize; s++)
+            bots[s].Brain.Genes = evo.Genomes[perm[s]];
+        for (int m = 0; m < Matches; m++)
+            matches[m].Reset(generation * 7919 + m * 31 + 13);
     }
 
     void EndGeneration()
     {
         var fit = new float[PopSize];
         float sum = 0f, best = float.MinValue;
-        int bestIdx = 0, totalMakes = 0;
-        for (int i = 0; i < PopSize; i++)
+        int bestSlot = 0, totalMakes = 0;
+        float totalNear = 0f;
+        for (int s = 0; s < PopSize; s++)
         {
-            fit[i] = bots[i].Fitness;
-            sum += fit[i];
-            totalMakes += bots[i].Makes;
-            if (fit[i] > best) { best = fit[i]; bestIdx = i; }
+            fit[perm[s]] = bots[s].Fitness;
+            sum += bots[s].Fitness;
+            totalMakes += bots[s].Makes;
+            totalNear += bots[s].NearMiss;
+            if (bots[s].Fitness > best) { best = bots[s].Fitness; bestSlot = s; }
         }
         lastBest = best;
         lastAvg = sum / PopSize;
         lastAvgMakes = totalMakes / (float)PopSize;
-        lastBestMakes = bots[bestIdx].Makes;
-        lastBestShots = bots[bestIdx].Shots;
+        lastAvgNearMiss = totalNear / PopSize;
+        lastBestMakes = bots[bestSlot].Makes;
+        lastBestShots = bots[bestSlot].Shots;
+        lastBestSteals = bots[bestSlot].Steals;
         if (best > bestEver) bestEver = best;
 
         // Curriculum: make the rim smaller once the population is comfortable.
@@ -307,16 +297,15 @@ public partial class Main : Node3D
         makesEma = 0.8f * makesEma + 0.2f * lastAvgMakes;
         if (makesEma >= ShrinkAtAvgMakes
             && gensSinceShrink >= MinGensBetweenShrinks
-            && Humanoid.RimRadius > Humanoid.RimFinal + 0.001f)
+            && Match.RimRadius > Match.RimFinal + 0.001f)
         {
-            Humanoid.RimRadius = MathF.Max(Humanoid.RimFinal, Humanoid.RimRadius * 0.9f);
+            Match.RimRadius = MathF.Max(Match.RimFinal, Match.RimRadius * 0.9f);
             gensSinceShrink = 0;
             makesEma = 0f;
         }
 
         evo.NextGeneration(fit);
         generation++;
-        showElites = true;
         if (generation % SaveEvery == 0) Save();
         StartGeneration();
     }
@@ -327,7 +316,7 @@ public partial class Main : Node3D
         int steps = 0;
         while (acc >= Dt && steps < 3000)
         {
-            for (int i = 0; i < PopSize; i++) bots[i].Step(Dt);
+            for (int m = 0; m < Matches; m++) matches[m].Step(Dt);
             simTime += Dt;
             acc -= Dt;
             steps++;
@@ -335,21 +324,21 @@ public partial class Main : Node3D
         }
         if (steps >= 3000) acc = 0f;
 
-        if (!Mathf.IsEqualApprox(shownRim, Humanoid.RimRadius)) ApplyRimVisuals();
+        if (!Mathf.IsEqualApprox(shownRim, Match.RimRadius)) ApplyRimVisuals();
 
         // Visuals once per frame.
-        float lead = float.MinValue;
-        for (int i = 0; i < PopSize; i++)
+        for (int s = 0; s < PopSize; s++) bots[s].SyncVisual();
+        for (int m = 0; m < Matches; m++)
         {
-            bots[i].SyncVisual();
-            balls[i].Position = bots[i].BallPos;
-            hoops[i].Position = bots[i].HoopPos;
-            if (bots[i].Fitness > lead) { lead = bots[i].Fitness; leaderIdx = i; }
+            Match mm = matches[m];
+            balls[m].Position = mm.Ball;
+            dots[m].Visible = mm.Holder >= 0;
+            if (mm.Holder >= 0)
+                dots[m].Position = mm.P[mm.Holder].Pos + new Vector3(0, 2.3f, 0);
         }
-        leaderDot.Position = bots[leaderIdx].Pos + new Vector3(0, 2.3f, 0);
 
         if (followCam) UpdateFollowCam((float)delta);
-        UpdateHud(lead);
+        UpdateHud();
     }
 
     // ---------------- camera + HUD + input ----------------
@@ -358,48 +347,53 @@ public partial class Main : Node3D
     {
         if (followCam) speedIdx = savedSpeedIdx;
         followCam = false;
-        cam.Position = new Vector3(0, 62, 14);
+        cam.Position = new Vector3(0, 60, 12);
         cam.LookAt(Vector3.Zero);
     }
 
-    // Follows one fixed bot (not the live leader, which changes every few frames),
-    // and drops to 1x speed so you can actually watch it. Leaving follow mode restores the old speed.
+    // Watches one game from a fixed spot at 1x speed. Leaving follow mode restores the old speed.
     void EnterFollowCam()
     {
         followCam = true;
         savedSpeedIdx = speedIdx;
         speedIdx = 1;
-        cam.Position = FollowSpot(bots[followIdx]);
+        cam.Position = FollowSpot(followIdx);
     }
 
-    static Vector3 FollowSpot(Humanoid b)
+    Vector3 FollowSpot(int m)
     {
-        float a = b.Yaw + 0.7f; // a bit off to the side so the arms and ball are visible
-        return b.Pos + new Vector3(MathF.Sin(a) * 5.5f, 3.2f, MathF.Cos(a) * 5.5f);
+        return matches[m].Center + new Vector3(0, 8f, 11f);
     }
 
     void UpdateFollowCam(float delta)
     {
-        Humanoid b = bots[followIdx];
-        Vector3 desired = FollowSpot(b);
+        Vector3 desired = FollowSpot(followIdx);
         if (cam.Position.DistanceTo(desired) > 15f)
-            cam.Position = desired; // bot was reset or switched, so snap instead of swooping
+            cam.Position = desired; // switched game, so snap instead of swooping
         else
             cam.Position = cam.Position.Lerp(desired, 1f - MathF.Exp(-5f * delta));
-        cam.LookAt(b.Pos + new Vector3(0, 1.1f, 0));
+        cam.LookAt(matches[followIdx].Center + new Vector3(0, 1.2f, -1.5f));
     }
 
-    void UpdateHud(float leaderFit)
+    void UpdateHud()
     {
+        string follow = "";
+        if (followCam)
+        {
+            Match mm = matches[followIdx];
+            Humanoid a = mm.P[0], b = mm.P[1];
+            follow =
+                $"Game #{followIdx}:  Blue {mm.Points[0]} - {mm.Points[1]} Red    shot clock {mm.ShotClockLeft:0.0}s\n" +
+                $"Blue: fitness {a.Fitness:0}, shots {a.Shots}, steals {a.Steals}    Red: fitness {b.Fitness:0}, shots {b.Shots}, steals {b.Steals}\n";
+        }
+
         hud.Text =
             $"Generation {generation}    Time {simTime:0.0}/{EpisodeTime:0}s    Speed x{SpeedLevels[speedIdx]:0.##}\n" +
-            $"Last gen: best {lastBest:0.0}, avg {lastAvg:0.0}, best bot made {lastBestMakes} baskets on {lastBestShots} shots\n" +
-            $"Avg baskets per bot: {lastAvgMakes:0.00} (smoothed {makesEma:0.00}, rim shrinks at {ShrinkAtAvgMakes:0.0})    Rim radius {Humanoid.RimRadius:0.00} (regulation {Humanoid.RimFinal:0.00})    Mutation x{evo.MutationScale:0.0}\n" +
-            $"Best ever: {bestEver:0.0}    Live leader: {leaderFit:0.0} ({bots[leaderIdx].Makes} baskets)\n" +
-            (followCam
-                ? $"Following bot #{followIdx} (gold = last gen's best)   pickups {bots[followIdx].Pickups}   shots {bots[followIdx].Shots}   baskets {bots[followIdx].Makes}   carrying: {(bots[followIdx].HasBall ? "yes" : "no")}\n"
-                : "") +
-            "[Up/Down] speed   [Tab] camera   [Left/Right] pick bot   [S] save   [E] export to project   [R] restart";
+            $"Last gen: best {lastBest:0.0}, avg {lastAvg:0.0}; best bot made {lastBestMakes} baskets on {lastBestShots} shots, {lastBestSteals} steals\n" +
+            $"Avg baskets per bot: {lastAvgMakes:0.00} (smoothed {makesEma:0.00}, rim shrinks at {ShrinkAtAvgMakes:0.0})    Rim radius {Match.RimRadius:0.00} (regulation {Match.RimFinal:0.00})    Mutation x{evo.MutationScale:0.0}\n" +
+            $"Avg near-miss points per bot: {lastAvgNearMiss:0.0}    Best ever: {bestEver:0.0}\n" +
+            follow +
+            "[Up/Down] speed   [Tab] camera   [Left/Right] pick game   [S] save   [E] export to project   [R] restart";
     }
 
     public override void _UnhandledInput(InputEvent @event)
@@ -413,8 +407,8 @@ public partial class Main : Node3D
                 case Key.Tab:
                     if (followCam) SetOverviewCam(); else EnterFollowCam();
                     break;
-                case Key.Right: followIdx = (followIdx + 1) % PopSize; break;
-                case Key.Left: followIdx = (followIdx + PopSize - 1) % PopSize; break;
+                case Key.Right: followIdx = (followIdx + 1) % Matches; break;
+                case Key.Left: followIdx = (followIdx + Matches - 1) % Matches; break;
                 case Key.S: Save(); break;
                 case Key.E: ExportToProject(); break;
                 case Key.R: Restart(); break;
@@ -433,7 +427,7 @@ public partial class Main : Node3D
             w.Write(generation);
             w.Write(PopSize);
             w.Write(evo.GeneCount);
-            w.Write(Humanoid.RimRadius);
+            w.Write(Match.RimRadius);
             foreach (float[] genome in evo.Genomes)
                 foreach (float f in genome)
                     w.Write(f);
@@ -461,49 +455,94 @@ public partial class Main : Node3D
         }
     }
 
+    // Turns a stage 3 genome (9 inputs, 16 hidden) into a stage 4 genome (13 inputs, 20 hidden).
+    // The new inputs get zero weights and the new hidden neurons get zero outgoing weights,
+    // so the converted bot starts out behaving exactly like the old shooter.
+    static float[] ConvertGenome(float[] old, Random r)
+    {
+        int oi = OldLayers[0], oh = OldLayers[1], oo = OldLayers[2];
+        int ni = Layers[0], nh = Layers[1], no = Layers[2];
+        var g = new float[Brain.GeneCount(Layers)];
+        int pos = 0;
+
+        // Layer 1: hidden neuron h has ni weights, then a bias.
+        for (int h = 0; h < nh; h++)
+        {
+            for (int i = 0; i < ni; i++)
+            {
+                float w;
+                if (h < oh) w = i < oi ? old[h * (oi + 1) + i] : 0f;
+                else w = (float)((r.NextDouble() * 2 - 1) * 0.3);
+                g[pos++] = w;
+            }
+            g[pos++] = h < oh ? old[h * (oi + 1) + oi] : 0f;
+        }
+
+        // Layer 2: output neuron o has nh weights, then a bias.
+        int oldL2 = oh * (oi + 1);
+        for (int o = 0; o < no; o++)
+        {
+            for (int h = 0; h < nh; h++)
+                g[pos++] = h < oh ? old[oldL2 + o * (oh + 1) + h] : 0f;
+            g[pos++] = old[oldL2 + o * (oh + 1) + oh];
+        }
+        return g;
+    }
+
     void TryLoad()
     {
         try
         {
-            // Prefer the local save, then brains shipped with the project, then older 3b brains as a warm start.
-            string path = null;
-            bool legacy = false;
+            // Prefer the local stage 4 save, then brains shipped with the project, then stage 3 brains.
             string[] candidates =
             {
                 SavePath,
                 ProjectSettings.GlobalizePath(SeedPath),
-                ProjectSettings.GlobalizePath(LegacySaveName),
-                ProjectSettings.GlobalizePath(LegacySeedPath)
+                ProjectSettings.GlobalizePath(Legacy3cSave),
+                ProjectSettings.GlobalizePath(Legacy3cSeed),
+                ProjectSettings.GlobalizePath(Legacy3bSave),
+                ProjectSettings.GlobalizePath(Legacy3bSeed)
             };
+            string path = null;
             for (int c = 0; c < candidates.Length; c++)
             {
-                if (File.Exists(candidates[c]))
-                {
-                    path = candidates[c];
-                    legacy = c >= 2;
-                    break;
-                }
+                if (File.Exists(candidates[c])) { path = candidates[c]; break; }
             }
             if (path == null) return;
+
             using var r = new BinaryReader(File.OpenRead(path));
             int gen = r.ReadInt32();
             int pop = r.ReadInt32();
             int genes = r.ReadInt32();
             float rim = r.ReadSingle();
-            if (pop != PopSize || genes != evo.GeneCount)
+            int oldGenes = Brain.GeneCount(OldLayers);
+            bool convert = genes == oldGenes;
+            if (pop != PopSize || (genes != evo.GeneCount && !convert))
             {
                 GD.Print("Save file has a different network shape, ignoring it.");
                 return;
             }
+
+            var conv = new Random(99);
             for (int i = 0; i < pop; i++)
-                for (int g = 0; g < genes; g++)
-                    evo.Genomes[i][g] = r.ReadSingle();
-            generation = gen;
-            Humanoid.RimRadius = legacy ? StartRimRadius : rim;
-            showElites = true;
-            GD.Print(legacy
-                ? $"Warm-started from older brains (generation {gen}); rim reset to {StartRimRadius:0.00}."
-                : $"Loaded population at generation {gen}, rim radius {rim:0.00}.");
+            {
+                var raw = new float[genes];
+                for (int g = 0; g < genes; g++) raw[g] = r.ReadSingle();
+                evo.Genomes[i] = convert ? ConvertGenome(raw, conv) : raw;
+            }
+
+            if (convert)
+            {
+                generation = 1;
+                Match.RimRadius = StartRimRadius;
+                GD.Print("Warm-started from stage 3 brains (converted to the stage 4 network).");
+            }
+            else
+            {
+                generation = gen;
+                Match.RimRadius = rim;
+                GD.Print($"Loaded population at generation {gen}, rim radius {rim:0.00}.");
+            }
         }
         catch (Exception e)
         {
@@ -516,12 +555,11 @@ public partial class Main : Node3D
         try { if (File.Exists(SavePath)) File.Delete(SavePath); } catch (Exception) { }
         evo = new Evolution(PopSize, Brain.GeneCount(Layers), System.Environment.TickCount);
         generation = 1;
-        showElites = false;
         gensSinceShrink = 0;
         makesEma = 0f;
-        Humanoid.RimRadius = StartRimRadius;
-        bestEver = lastBest = lastAvg = lastAvgMakes = 0f;
-        lastBestMakes = lastBestShots = 0;
+        Match.RimRadius = StartRimRadius;
+        bestEver = lastBest = lastAvg = lastAvgMakes = lastAvgNearMiss = 0f;
+        lastBestMakes = lastBestShots = lastBestSteals = 0;
         StartGeneration();
     }
 }
